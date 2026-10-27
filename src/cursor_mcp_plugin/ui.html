@@ -493,7 +493,7 @@
 
         // Add instructions for localhost when disconnected
         if (!isConnected) {
-          statusMessage += `<br><br>Run this in your terminal, then connect<br><code>bunx cursor-talk-to-figma-socket</code>`;
+          statusMessage += `<br><br>Run this in your terminal, then connect<br><code>~/tools/talk-to-figma/start-relay.sh</code>`;
         }
 
         connectionStatus.innerHTML = statusMessage;
@@ -926,8 +926,9 @@
         const mcpConfig = {
           mcpServers: {
             TalkToFigma: {
-              command: "bunx",
-              args: ["cursor-talk-to-figma-mcp@latest"],
+              // Local build from aliefauzan/talk-to-figma-mcp (never bunx @latest)
+              command: "bun",
+              args: ["/Users/YOUR_USER/tools/talk-to-figma/dist/server.js"],
             },
           },
         };
