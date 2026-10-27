@@ -1,4 +1,4 @@
-# Local patches (branch `shoo`)
+# Local patches
 
 Based on upstream `grab/cursor-talk-to-figma-mcp` at `ddd90f3`.
 
