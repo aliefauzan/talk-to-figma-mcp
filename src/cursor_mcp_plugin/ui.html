@@ -413,6 +413,8 @@
         const queue = [];
 
         function send(name, params) {
+          // Local patch: analytics disabled, nothing is sent.
+          return;
           const eventParams = Object.assign(
             {
               session_id: sessionId,
