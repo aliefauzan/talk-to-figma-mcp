@@ -16,8 +16,9 @@ After a manifest change, re-import the plugin in Figma Desktop; a plain re-run k
 ## Extra plugin commands
 
 These run in Figma Desktop, so they use your local fonts (SF Pro etc.) and do not
-count against the hosted Figma MCP rate limit. They have no MCP tool yet; call them
-with the CLI below.
+count against the hosted Figma MCP rate limit. Each has an MCP tool of the same name
+in `server.ts` (`get_screenshot` and `download_assets` return images; `upload_asset`
+also takes a local `filePath`). The CLI below still works without the MCP server.
 
 | Command | Hosted Figma MCP equivalent | Params |
 |---|---|---|

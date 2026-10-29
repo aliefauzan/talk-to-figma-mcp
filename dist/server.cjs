@@ -2537,6 +2537,218 @@ server.tool(
     }
   }
 );
+function errorContent(command, error) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Error running ${command}: ${error instanceof Error ? error.message : String(error)}`
+      }
+    ]
+  };
+}
+function jsonText(value) {
+  return {
+    type: "text",
+    text: typeof value === "string" ? value : JSON.stringify(value, null, 2)
+  };
+}
+function registerPluginTool(name, description, schema, timeoutMs = 3e4) {
+  server.tool(name, description, schema, async (params) => {
+    try {
+      const result = await sendCommandToFigma(name, params, timeoutMs);
+      return { content: [jsonText(result)] };
+    } catch (error) {
+      return errorContent(name, error);
+    }
+  });
+}
+registerPluginTool(
+  "run_script",
+  "Run Figma Plugin API JavaScript inside Figma Desktop (local equivalent of the hosted use_figma tool). `code` is the body of an async function with `figma` and `params` in scope; use top-level await and `return` a JSON-serializable value. Local fonts (SF Pro etc.) are available.",
+  {
+    code: import_zod.z.string().describe("Body of an async function(figma, params). Use `return` to send data back."),
+    params: import_zod.z.record(import_zod.z.any()).optional().describe("Optional values passed to the script as `params`")
+  },
+  12e4
+);
+registerPluginTool(
+  "get_metadata",
+  "Get an XML outline of a node's subtree (ids, types, names, positions, sizes). Without nodeId, lists the pages.",
+  {
+    nodeId: import_zod.z.string().optional().describe("Root node ID; omit to list pages"),
+    depth: import_zod.z.number().optional().describe("Maximum depth to traverse")
+  },
+  6e4
+);
+server.tool(
+  "get_screenshot",
+  "Render a node as an image, scaled so its longest edge is at most maxDimension",
+  {
+    nodeId: import_zod.z.string().describe("The ID of the node to render"),
+    maxDimension: import_zod.z.number().optional().describe("Longest edge in pixels (default 1024)"),
+    format: import_zod.z.enum(["PNG", "JPG"]).optional().describe("Image format (default PNG)")
+  },
+  async (params) => {
+    try {
+      const result = await sendCommandToFigma("get_screenshot", params, 6e4);
+      const { imageData, ...meta } = result;
+      return {
+        content: [
+          { type: "image", data: imageData, mimeType: result.mimeType },
+          jsonText(meta)
+        ]
+      };
+    } catch (error) {
+      return errorContent("get_screenshot", error);
+    }
+  }
+);
+registerPluginTool(
+  "get_design_context",
+  "Describe a node (or the current selection) for design-to-code: layout, fills, text, styles, variables and components",
+  {
+    nodeId: import_zod.z.string().optional().describe("Node ID; omit to use the current selection"),
+    depth: import_zod.z.number().optional().describe("Maximum depth to describe (default 6)")
+  },
+  6e4
+);
+registerPluginTool(
+  "get_variable_defs",
+  "List the variables bound inside a node (or the current selection) with their resolved values",
+  {
+    nodeId: import_zod.z.string().optional().describe("Node ID; omit to use the current selection")
+  }
+);
+registerPluginTool(
+  "search_design_system",
+  "Search local (and enabled library) components, styles and variables by name",
+  {
+    query: import_zod.z.string().describe("Case-insensitive substring to match against names"),
+    types: import_zod.z.array(import_zod.z.enum(["component", "style", "variable"])).optional().describe("Kinds of assets to search (default all)"),
+    includeLibraries: import_zod.z.boolean().optional().describe("Also search enabled library variables (default true)"),
+    allPages: import_zod.z.boolean().optional().describe("Search every page, not only the current one (default true)"),
+    limit: import_zod.z.number().optional().describe("Maximum results per kind (default 50)")
+  },
+  6e4
+);
+registerPluginTool(
+  "get_libraries",
+  "List the libraries enabled in this file (only libraries that publish variables are visible to plugins)",
+  {}
+);
+registerPluginTool(
+  "get_figjam",
+  "Read stickies, shapes, text, connectors and sections from a FigJam board",
+  {
+    nodeId: import_zod.z.string().optional().describe("Root node ID; omit to read the current page")
+  },
+  6e4
+);
+registerPluginTool("whoami", "Get the current Figma user", {});
+server.tool(
+  "download_assets",
+  "Export nodes as images (PNG/JPG returned as images, SVG returned as text)",
+  {
+    nodeIds: import_zod.z.array(import_zod.z.string()).describe("IDs of the nodes to export"),
+    format: import_zod.z.enum(["PNG", "JPG", "SVG", "PDF"]).optional().describe("Export format (default PNG)"),
+    scale: import_zod.z.number().positive().optional().describe("Export scale for PNG/JPG (default 2)")
+  },
+  async (params) => {
+    try {
+      const results = await sendCommandToFigma("download_assets", params, 12e4);
+      const content = [];
+      for (const item of results) {
+        if (!item.data) {
+          content.push(jsonText({ id: item.id, error: item.error }));
+        } else if (item.format === "SVG") {
+          content.push({ type: "text", text: Buffer.from(item.data, "base64").toString("utf8") });
+        } else if (item.format === "PDF") {
+          content.push(jsonText({ id: item.id, name: item.name, format: "PDF", base64: item.data }));
+        } else {
+          content.push(jsonText({ id: item.id, name: item.name }));
+          content.push({
+            type: "image",
+            data: item.data,
+            mimeType: item.format === "JPG" ? "image/jpeg" : "image/png"
+          });
+        }
+      }
+      return { content };
+    } catch (error) {
+      return errorContent("download_assets", error);
+    }
+  }
+);
+server.tool(
+  "upload_asset",
+  "Put an image into Figma as an image fill: on an existing node, or on a new rectangle at the viewport center",
+  {
+    filePath: import_zod.z.string().optional().describe("Local image file to upload (alternative to base64)"),
+    base64: import_zod.z.string().optional().describe("Base64-encoded image bytes (alternative to filePath)"),
+    nodeId: import_zod.z.string().optional().describe("Node to fill; omit to create a rectangle"),
+    name: import_zod.z.string().optional().describe("Name for the new rectangle"),
+    scaleMode: import_zod.z.enum(["FILL", "FIT", "CROP", "TILE"]).optional().describe("Image scale mode (default FILL)"),
+    width: import_zod.z.number().optional().describe("Width of the new rectangle (default image width)"),
+    height: import_zod.z.number().optional().describe("Height of the new rectangle (default image height)")
+  },
+  async ({ filePath, base64, ...rest }) => {
+    try {
+      const data = filePath ? (await (0, import_promises.readFile)(filePath)).toString("base64") : base64;
+      if (!data) throw new Error("Pass filePath or base64");
+      const result = await sendCommandToFigma("upload_asset", { ...rest, base64: data }, 12e4);
+      return { content: [jsonText(result)] };
+    } catch (error) {
+      return errorContent("upload_asset", error);
+    }
+  }
+);
+registerPluginTool(
+  "read_fills",
+  "Read the raw fill paints of nodes, including gradients and image hashes",
+  {
+    nodeIds: import_zod.z.array(import_zod.z.string()).describe("IDs of the nodes to read")
+  }
+);
+registerPluginTool(
+  "upsert_paint_styles",
+  "Create or update local paint styles by name (solid hex, gradient, or a fill copied from a node image)",
+  {
+    styles: import_zod.z.array(
+      import_zod.z.object({
+        name: import_zod.z.string(),
+        hex: import_zod.z.string().optional(),
+        opacity: import_zod.z.number().optional(),
+        gradient: import_zod.z.any().optional(),
+        fromNodeImage: import_zod.z.string().optional(),
+        cleanExport: import_zod.z.boolean().optional(),
+        scale: import_zod.z.number().optional(),
+        description: import_zod.z.string().optional()
+      })
+    ).describe("Styles to create or update")
+  },
+  6e4
+);
+registerPluginTool(
+  "build_state_swatches",
+  "Draw a row of state color swatches that reference existing paint styles",
+  {
+    x: import_zod.z.number().describe("X position"),
+    y: import_zod.z.number().describe("Y position"),
+    title: import_zod.z.string().optional().describe("Optional title above the swatches"),
+    items: import_zod.z.array(
+      import_zod.z.object({
+        label: import_zod.z.string(),
+        base: import_zod.z.string(),
+        bg: import_zod.z.string(),
+        text: import_zod.z.string(),
+        hex: import_zod.z.string(),
+        usage: import_zod.z.string()
+      })
+    ).describe("Swatches; base/bg/text are paint style names")
+  },
+  6e4
+);
 server.tool(
   "join_channel",
   "Join a specific channel to communicate with Figma",

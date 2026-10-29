@@ -2515,6 +2515,218 @@ server.tool(
     }
   }
 );
+function errorContent(command, error) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Error running ${command}: ${error instanceof Error ? error.message : String(error)}`
+      }
+    ]
+  };
+}
+function jsonText(value) {
+  return {
+    type: "text",
+    text: typeof value === "string" ? value : JSON.stringify(value, null, 2)
+  };
+}
+function registerPluginTool(name, description, schema, timeoutMs = 3e4) {
+  server.tool(name, description, schema, async (params) => {
+    try {
+      const result = await sendCommandToFigma(name, params, timeoutMs);
+      return { content: [jsonText(result)] };
+    } catch (error) {
+      return errorContent(name, error);
+    }
+  });
+}
+registerPluginTool(
+  "run_script",
+  "Run Figma Plugin API JavaScript inside Figma Desktop (local equivalent of the hosted use_figma tool). `code` is the body of an async function with `figma` and `params` in scope; use top-level await and `return` a JSON-serializable value. Local fonts (SF Pro etc.) are available.",
+  {
+    code: z.string().describe("Body of an async function(figma, params). Use `return` to send data back."),
+    params: z.record(z.any()).optional().describe("Optional values passed to the script as `params`")
+  },
+  12e4
+);
+registerPluginTool(
+  "get_metadata",
+  "Get an XML outline of a node's subtree (ids, types, names, positions, sizes). Without nodeId, lists the pages.",
+  {
+    nodeId: z.string().optional().describe("Root node ID; omit to list pages"),
+    depth: z.number().optional().describe("Maximum depth to traverse")
+  },
+  6e4
+);
+server.tool(
+  "get_screenshot",
+  "Render a node as an image, scaled so its longest edge is at most maxDimension",
+  {
+    nodeId: z.string().describe("The ID of the node to render"),
+    maxDimension: z.number().optional().describe("Longest edge in pixels (default 1024)"),
+    format: z.enum(["PNG", "JPG"]).optional().describe("Image format (default PNG)")
+  },
+  async (params) => {
+    try {
+      const result = await sendCommandToFigma("get_screenshot", params, 6e4);
+      const { imageData, ...meta } = result;
+      return {
+        content: [
+          { type: "image", data: imageData, mimeType: result.mimeType },
+          jsonText(meta)
+        ]
+      };
+    } catch (error) {
+      return errorContent("get_screenshot", error);
+    }
+  }
+);
+registerPluginTool(
+  "get_design_context",
+  "Describe a node (or the current selection) for design-to-code: layout, fills, text, styles, variables and components",
+  {
+    nodeId: z.string().optional().describe("Node ID; omit to use the current selection"),
+    depth: z.number().optional().describe("Maximum depth to describe (default 6)")
+  },
+  6e4
+);
+registerPluginTool(
+  "get_variable_defs",
+  "List the variables bound inside a node (or the current selection) with their resolved values",
+  {
+    nodeId: z.string().optional().describe("Node ID; omit to use the current selection")
+  }
+);
+registerPluginTool(
+  "search_design_system",
+  "Search local (and enabled library) components, styles and variables by name",
+  {
+    query: z.string().describe("Case-insensitive substring to match against names"),
+    types: z.array(z.enum(["component", "style", "variable"])).optional().describe("Kinds of assets to search (default all)"),
+    includeLibraries: z.boolean().optional().describe("Also search enabled library variables (default true)"),
+    allPages: z.boolean().optional().describe("Search every page, not only the current one (default true)"),
+    limit: z.number().optional().describe("Maximum results per kind (default 50)")
+  },
+  6e4
+);
+registerPluginTool(
+  "get_libraries",
+  "List the libraries enabled in this file (only libraries that publish variables are visible to plugins)",
+  {}
+);
+registerPluginTool(
+  "get_figjam",
+  "Read stickies, shapes, text, connectors and sections from a FigJam board",
+  {
+    nodeId: z.string().optional().describe("Root node ID; omit to read the current page")
+  },
+  6e4
+);
+registerPluginTool("whoami", "Get the current Figma user", {});
+server.tool(
+  "download_assets",
+  "Export nodes as images (PNG/JPG returned as images, SVG returned as text)",
+  {
+    nodeIds: z.array(z.string()).describe("IDs of the nodes to export"),
+    format: z.enum(["PNG", "JPG", "SVG", "PDF"]).optional().describe("Export format (default PNG)"),
+    scale: z.number().positive().optional().describe("Export scale for PNG/JPG (default 2)")
+  },
+  async (params) => {
+    try {
+      const results = await sendCommandToFigma("download_assets", params, 12e4);
+      const content = [];
+      for (const item of results) {
+        if (!item.data) {
+          content.push(jsonText({ id: item.id, error: item.error }));
+        } else if (item.format === "SVG") {
+          content.push({ type: "text", text: Buffer.from(item.data, "base64").toString("utf8") });
+        } else if (item.format === "PDF") {
+          content.push(jsonText({ id: item.id, name: item.name, format: "PDF", base64: item.data }));
+        } else {
+          content.push(jsonText({ id: item.id, name: item.name }));
+          content.push({
+            type: "image",
+            data: item.data,
+            mimeType: item.format === "JPG" ? "image/jpeg" : "image/png"
+          });
+        }
+      }
+      return { content };
+    } catch (error) {
+      return errorContent("download_assets", error);
+    }
+  }
+);
+server.tool(
+  "upload_asset",
+  "Put an image into Figma as an image fill: on an existing node, or on a new rectangle at the viewport center",
+  {
+    filePath: z.string().optional().describe("Local image file to upload (alternative to base64)"),
+    base64: z.string().optional().describe("Base64-encoded image bytes (alternative to filePath)"),
+    nodeId: z.string().optional().describe("Node to fill; omit to create a rectangle"),
+    name: z.string().optional().describe("Name for the new rectangle"),
+    scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).optional().describe("Image scale mode (default FILL)"),
+    width: z.number().optional().describe("Width of the new rectangle (default image width)"),
+    height: z.number().optional().describe("Height of the new rectangle (default image height)")
+  },
+  async ({ filePath, base64, ...rest }) => {
+    try {
+      const data = filePath ? (await readFile(filePath)).toString("base64") : base64;
+      if (!data) throw new Error("Pass filePath or base64");
+      const result = await sendCommandToFigma("upload_asset", { ...rest, base64: data }, 12e4);
+      return { content: [jsonText(result)] };
+    } catch (error) {
+      return errorContent("upload_asset", error);
+    }
+  }
+);
+registerPluginTool(
+  "read_fills",
+  "Read the raw fill paints of nodes, including gradients and image hashes",
+  {
+    nodeIds: z.array(z.string()).describe("IDs of the nodes to read")
+  }
+);
+registerPluginTool(
+  "upsert_paint_styles",
+  "Create or update local paint styles by name (solid hex, gradient, or a fill copied from a node image)",
+  {
+    styles: z.array(
+      z.object({
+        name: z.string(),
+        hex: z.string().optional(),
+        opacity: z.number().optional(),
+        gradient: z.any().optional(),
+        fromNodeImage: z.string().optional(),
+        cleanExport: z.boolean().optional(),
+        scale: z.number().optional(),
+        description: z.string().optional()
+      })
+    ).describe("Styles to create or update")
+  },
+  6e4
+);
+registerPluginTool(
+  "build_state_swatches",
+  "Draw a row of state color swatches that reference existing paint styles",
+  {
+    x: z.number().describe("X position"),
+    y: z.number().describe("Y position"),
+    title: z.string().optional().describe("Optional title above the swatches"),
+    items: z.array(
+      z.object({
+        label: z.string(),
+        base: z.string(),
+        bg: z.string(),
+        text: z.string(),
+        hex: z.string(),
+        usage: z.string()
+      })
+    ).describe("Swatches; base/bg/text are paint style names")
+  },
+  6e4
+);
 server.tool(
   "join_channel",
   "Join a specific channel to communicate with Figma",
